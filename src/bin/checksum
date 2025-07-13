@@ -1,0 +1,192 @@
+#!/bin/bash -eu
+set -o pipefail
+
+source "$(dirname "${BASH_SOURCE[0]}")/../load"
+
+function _print_usage() {
+    echo "Usage: $(basename "$0") [ACTION] [DIRECTORY]"
+    echo
+    echo "Calculates or verifies SHA512 checksums for files in a directory and its subdirectories."
+    echo
+    echo "Actions:"
+    echo "  -c, --calculate   Calculate and store checksums."
+    echo "  -v, --verify      Verify existing checksums."
+    echo
+    echo "Arguments:"
+    echo "  DIRECTORY         The target directory."
+    echo
+}
+
+function _calculate() {
+    local directory="${1:-}"
+
+    if [[ -z "${directory}" ]]; then
+        _print_usage
+        return 1
+    fi
+
+    if [[ ! -d "${directory}" ]]; then
+        print_error "Directory ${directory} does not exist"
+        return 1
+    fi
+
+    total=$(find "${directory}" -type d | wc -l)
+    counter=1
+    while IFS= read -r dir; do
+        print_info "(${counter}/${total}) Calculating checksums for files in ${dir}"
+        (
+            cd "${dir}"
+            find . -maxdepth 1 -type f ! -name "checksums.sha512*" -exec sha512sum "{}" + > "./checksums.sha512"
+            sha512sum "./checksums.sha512" > "./checksums.sha512.sig"
+        )
+        counter=$((counter + 1))
+    done < <(find "${directory}" -type d)
+
+    print_success "Checksums calculated successfully"
+}
+
+function _verify_checksums() {
+    local directory="${1:-}"
+
+    if [[ ! -f "${directory}/checksums.sha512" ]]; then
+        print_error "Missing checksums file for ${directory}"
+        return 1
+    fi
+
+    if [[ ! -f "${directory}/checksums.sha512.sig" ]]; then
+        print_error "Missing signature file for ${directory}"
+        return 1
+    fi
+}
+
+function _verify_signature() {
+    local directory="${1:-}"
+
+    (
+        cd "${directory}"
+        if ! sha512sum --quiet -c "checksums.sha512.sig" &> /dev/null; then
+            print_error "Signature verification failed for ${directory}"
+            return 1
+        fi
+    )
+}
+
+function _verify() {
+    local directory="${1:-}"
+    local output_file
+    local exit_code=0
+
+    output_file="$(mktemp)"
+
+    if [[ -z "${directory}" ]]; then
+        _print_usage
+        return 1
+    fi
+
+    if [[ ! -d "${directory}" ]]; then
+        print_error "Directory ${directory} does not exist"
+        return 1
+    fi
+
+    total=$(find "${directory}" -type d | wc -l)
+    counter=1
+    while IFS= read -r dir; do
+        if ! _verify_checksums "${dir}"; then
+            exit_code=10
+            continue
+        fi
+
+        if ! _verify_signature "${dir}"; then
+            exit_code=2
+            continue
+        fi
+
+        print_info "(${counter}/${total}) Verifying checksums for files in ${dir}"
+        echo "++${dir}" >> "${output_file}"
+        (
+            cd "${dir}"
+            sha512sum --quiet -c "checksums.sha512" >> "${output_file}"
+        )
+        counter=$((counter + 1))
+    done < <(find "${directory}" -type d)
+
+    if grep -q "FAILED" "${output_file}"; then
+        print_error "Checksum verification failed"
+        base_dir=""
+        while IFS= read -r line; do
+            if [[ "${line}" == "++"* ]]; then
+                base_dir="${line#++}"
+            else
+                echo "${base_dir}${line#./}"
+            fi
+        done < "${output_file}"
+        exit_code=1
+    elif [[ "${exit_code}" -eq 2 ]]; then
+        print_error "Signature verification failed for some directories"
+    elif [[ "${exit_code}" -eq 10 ]]; then
+        print_warning "Some directories are missing checksums files or signatures"
+    else
+        print_success "Checksums verified successfully"
+    fi
+
+    rm "${output_file}"
+    return "${exit_code}"
+}
+
+function main() {
+    if [[ $# -eq 0 ]]; then
+        _print_usage
+        return 1
+    fi
+
+    local action=""
+    local directory=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        -c | --calculate)
+            action="calculate"
+            shift
+            ;;
+        -v | --verify)
+            action="verify"
+            shift
+            ;;
+        *)
+            if [[ -z "${directory}" ]]; then
+                directory="$1"
+                shift
+            else
+                print_error "Unknown argument: $1"
+                _print_usage
+                return 1
+            fi
+            ;;
+        esac
+    done
+
+    if [[ -z "${action}" ]]; then
+        print_error "No action specified."
+        _print_usage
+        return 1
+    fi
+
+    if [[ -z "${directory}" ]]; then
+        print_error "No directory specified."
+        _print_usage
+        return 1
+    fi
+
+    case "${action}" in
+    calculate)
+        _calculate "${directory}"
+        ;;
+    verify)
+        _verify "${directory}"
+        ;;
+    esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

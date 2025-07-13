@@ -1,0 +1,98 @@
+#!/bin/bash -eu
+set -o pipefail
+
+source "$(dirname "${BASH_SOURCE[0]}")/../load"
+
+function _print_usage() {
+    echo
+    echo "Usage: $(basename "${0}") DEVICE LABEL"
+    echo
+    echo "DEVICE: The device to format (e.g. /dev/sdb)"
+    echo "LABEL: The label for the new exFAT filesystem (max 15 characters)"
+    echo
+}
+
+function _format_disk() {
+    local device="${1}"
+    local label="${2}"
+    local partition
+
+    if [[ -z "${device}" || -z "${label}" ]]; then
+        _print_usage
+        return 1
+    fi
+
+    echo
+    print_info "Unmounting ${device}..."
+    sudo umount "${device}"* || true
+
+    print_info "Wiping all filesystem and partition signatures..."
+    if ! sudo wipefs -a "${device}"; then
+        print_error "Failed to wipe filesystem and partition signatures on ${device}"
+        return 1
+    fi
+
+    print_info "Creating GPT partition table..."
+    if ! sudo parted "${device}" --script mklabel gpt; then
+        print_error "Failed to create GPT partition table on ${device}"
+        return 1
+    fi
+
+    print_info "Creating a full-disk aligned partition..."
+    if ! sudo parted "${device}" --script mkpart primary fat32 1MiB 100%; then
+        print_error "Failed to create partition on ${device}"
+        return 1
+    fi
+
+    partition="${device}1"
+    print_info "Formatting partition ${partition} as exFAT..."
+    if ! sudo mkfs.exfat -n "${label}" "${partition}"; then
+        print_error "Failed to format partition ${partition} as exFAT"
+        return 1
+    fi
+
+    echo
+    print_success "Done! Disk ${device} is now formatted as exFAT with label '${label}'"
+    lsblk -f "${device}"
+}
+
+function main() {
+    local device=""
+    local label=""
+
+    if [[ $# -eq 0 ]]; then
+        _print_usage
+        echo "=== Available Disks ==="
+        lsblk -d -o NAME,SIZE,MODEL,LABEL
+        echo
+        read -rp "Enter the device to format (e.g. /dev/sdb): " device
+        read -rp "Enter a label for the new exFAT filesystem (max 15 characters): " label
+
+    elif [[ $# -eq 2 ]]; then
+        device="${1}"
+        label="${2}"
+    else
+        _print_usage
+        return 1
+    fi
+
+    if [[ -z "${device}" || -z "${label}" ]]; then
+        echo
+        print_error "Aborted: Device and label must be provided."
+        return 1
+    fi
+
+    # Confirm
+    echo
+    read -rp "Are you sure you want to format ${device}? This will ERASE ALL DATA! (yes/NO): " confirm
+    if [[ "${confirm}" != "yes" ]]; then
+        echo "Aborted."
+        return 1
+    fi
+
+    _format_disk "${device}" "${label}"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

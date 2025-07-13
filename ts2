@@ -1,0 +1,43 @@
+#!/bin/bash -eu
+set -o pipefail
+
+source "$(dirname "${BASH_SOURCE[0]}")"/src/load
+
+commands="$(find "$(dirname "${BASH_SOURCE[0]}")"/src/bin -type f -exec basename {} \;)"
+
+function print_help() {
+    echo
+    echo "Usage: ts2 COMMAND"
+    echo
+    echo "Commands:"
+    echo "${commands}"
+}
+
+function main() {
+    local command="${1:-}"
+
+    if [[ -z "${command}" ]]; then
+        print_help
+        return 1
+    else
+        shift
+    fi
+
+    if [[ "${commands}" != *"${command}"* ]]; then
+        echo "Unknown command: ${command}"
+        print_help
+        return 1
+    fi
+
+    if [[ ! -f "$(dirname "${BASH_SOURCE[0]}")/src/bin/${command}" ]]; then
+        echo "Unknown command: ${command}"
+        print_help
+        return 1
+    fi
+
+    "$(dirname "${BASH_SOURCE[0]}")/src/bin/${command}" "$@"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
