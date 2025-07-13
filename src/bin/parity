@@ -1,0 +1,260 @@
+#!/bin/bash -eu
+set -o pipefail
+
+source "$(dirname "${BASH_SOURCE[0]}")/../load"
+
+function _print_usage() {
+    echo "Usage: $(basename "$0") [ACTION] [DIRECTORY]"
+    echo
+    echo "Calculates, verifies, or repairs PAR2 data for files in a directory and its subdirectories."
+    echo
+    echo "Actions:"
+    echo "  -c, --calculate   Calculate and store PAR2 data."
+    echo "  -v, --verify      Verify existing PAR2 data."
+    echo "  -r, --repair      Repair files using PAR2 data."
+    echo "  -d, --delete      Delete all PAR2 data."
+    echo
+    echo "Arguments:"
+    echo "  DIRECTORY         The target directory."
+    echo
+}
+
+par2=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../ext/par2")
+
+function _calculate() {
+    local directory="${1:-}"
+    local exit_code=0
+
+    if [[ -z "${directory}" ]]; then
+        _print_usage
+        return 1
+    fi
+
+    if [[ ! -d "${directory}" ]]; then
+        print_error "Directory ${directory} does not exist"
+        return 1
+    fi
+
+    total=$(find "${directory}" -type d | wc -l)
+    counter=1
+    while IFS= read -r dir; do
+        print_info "(${counter}/${total}) Calculating parity data for files in ${dir}"
+        if ! (cd "${dir}" && find . -maxdepth 1 -type f ! -name "*.par2" -exec "${par2}" create -r10 -q ".$(basename "${dir}").par2" "{}" +); then
+            print_error "Failed to calculate parity data for ${dir}"
+            exit_code=1
+        fi
+        counter=$((counter + 1))
+    done < <(find "${directory}" -type d)
+
+    if [[ ${exit_code} -eq 0 ]]; then
+        echo
+        print_success "Parity data calculated successfully for all directories"
+    else
+        echo
+        print_error "Failed to calculate parity data for some directories"
+    fi
+    return "${exit_code}"
+}
+
+function _verify() {
+    local directory="${1:-}"
+    local exit_code=0
+
+    if [[ -z "${directory}" ]]; then
+        _print_usage
+        return 1
+    fi
+
+    if [[ ! -d "${directory}" ]]; then
+        print_error "Directory ${directory} does not exist"
+        return 1
+    fi
+
+    total=$(find "${directory}" -type d | wc -l)
+    counter=1
+    while IFS= read -r dir; do
+        print_info "(${counter}/${total}) Verifying parity data for files in ${dir}"
+
+        if [[ ! -f "${dir}/.$(basename "${dir}").par2" ]]; then
+            print_error "Parity data file does not exist for ${dir}"
+            exit_code=1
+            continue
+        fi
+
+        if ! output=$(cd "${dir}" && find . -maxdepth 1 -name ".$(basename "${dir}").par2" -exec "${par2}" verify -q "{}" \;); then
+            print_error "Failed to verify parity data for ${dir}"
+            echo "${output}"
+            exit_code=1
+        elif echo "${output}" | grep -q -e "is damaged" -e "Repair is required"; then
+            print_warning "Verification found damaged files in ${dir}"
+            echo "${output}"
+            exit_code=1
+        else
+            print_success "Parity data verified successfully for ${dir}"
+        fi
+        counter=$((counter + 1))
+    done < <(find "${directory}" -type d)
+
+    if [[ ${exit_code} -eq 0 ]]; then
+        echo
+        print_success "Parity data verified successfully for all directories"
+    else
+        echo
+        print_error "Failed to verify parity data for some directories"
+    fi
+    return "${exit_code}"
+}
+
+function _repair() {
+    local directory="${1:-}"
+    local exit_code=0
+
+    if [[ -z "${directory}" ]]; then
+        _print_usage
+        return 1
+    fi
+
+    if [[ ! -d "${directory}" ]]; then
+        print_error "Directory ${directory} does not exist"
+        return 1
+    fi
+
+    total=$(find "${directory}" -type d | wc -l)
+    counter=1
+    while IFS= read -r dir; do
+        print_info "(${counter}/${total}) Repairing files in ${dir}"
+
+        if [[ ! -f "${dir}/.$(basename "${dir}").par2" ]]; then
+            print_error "Parity data file does not exist for ${dir}"
+            exit_code=1
+            continue
+        fi
+
+        output=$( (cd "${dir}" && find . -maxdepth 1 -name ".$(basename "${dir}").par2" -exec "${par2}" repair -q "{}" \;) 2>&1)
+        # shellcheck disable=SC2181
+        if [[ $? -ne 0 ]]; then
+            print_error "Failed to repair files in ${dir}"
+            echo "${output}"
+            exit_code=1
+        elif echo "${output}" | grep -q "Repair is not possible"; then
+            print_error "Repair is not possible for ${dir}"
+            echo "${output}"
+            exit_code=1
+        else
+            print_success "Files repaired successfully for ${dir}"
+        fi
+        counter=$((counter + 1))
+    done < <(find "${directory}" -type d)
+
+    if [[ ${exit_code} -eq 0 ]]; then
+        echo
+        print_success "Files repaired successfully for all directories"
+    else
+        echo
+        print_error "Failed to repair files for some directories"
+    fi
+
+    return "${exit_code}"
+}
+
+function _delete() {
+    local directory="${1:-}"
+
+    if [[ -z "${directory}" ]]; then
+        _print_usage
+        return 1
+    fi
+
+    if [[ ! -d "${directory}" ]]; then
+        print_error "Directory ${directory} does not exist"
+        return 1
+    fi
+
+    read -rp "Are you sure you want to delete all parity data in ${directory} and its subdirectories? (yes/NO): " confirm
+    if [[ "${confirm}" != "yes" ]]; then
+        echo "Aborted."
+        return 1
+    fi
+
+    print_info "Deleting all parity data in ${directory}"
+    if ! find "${directory}" -type f -name "*.par2" -delete; then
+        print_error "Failed to delete parity data in ${directory}"
+        return 1
+    fi
+
+    echo
+    print_success "Parity data deleted successfully for all directories"
+    return 0
+}
+
+function main() {
+    if [[ $# -eq 0 ]]; then
+        _print_usage
+        return 1
+    fi
+
+    local action=""
+    local directory=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        -c | --calculate)
+            action="calculate"
+            shift
+            ;;
+        -v | --verify)
+            action="verify"
+            shift
+            ;;
+        -r | --repair)
+            action="repair"
+            shift
+            ;;
+        -d | --delete)
+            action="delete"
+            shift
+            ;;
+        *)
+            if [[ -z "${directory}" ]]; then
+                directory="$1"
+                shift
+            else
+                print_error "Unknown argument: $1"
+                _print_usage
+                return 1
+            fi
+            ;;
+        esac
+    done
+
+    if [[ -z "${action}" ]]; then
+        print_error "No action specified."
+        _print_usage
+        return 1
+    fi
+
+    if [[ -z "${directory}" ]]; then
+        print_error "No directory specified."
+        _print_usage
+        return 1
+    fi
+
+    case "${action}" in
+    calculate)
+        _calculate "${directory}"
+        ;;
+    verify)
+        _verify "${directory}"
+        ;;
+    repair)
+        _repair "${directory}"
+        ;;
+    delete)
+        _delete "${directory}"
+        ;;
+    esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

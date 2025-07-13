@@ -1,0 +1,72 @@
+#!/bin/bash -eu
+set -o pipefail
+
+source "$(dirname "${BASH_SOURCE[0]}")/../load"
+
+function _print_usage() {
+    echo
+    echo "Usage: $(basename "${0}") MOUNTPOINT"
+    echo
+    echo "MOUNTPOINT: The mount point to unmount (e.g. /media/damian/str-00)"
+    echo
+}
+
+function _safe_umount() {
+    local mountpoint="${1}"
+    local device="${2}"
+
+    if [[ -z "${mountpoint}" || -z "${device}" ]]; then
+        _print_usage
+        return 1
+    fi
+
+    print_info "Unmounting ${mountpoint}..."
+    sudo umount "${mountpoint}" || true
+
+    print_info "Shutting down ${device}..."
+    if ! sudo udisksctl power-off -b "${device}"; then
+        print_error "Failed to power off ${device}"
+        return 1
+    else
+        print_success "${mountpoint} has been safely unmounted and ${device} has been powered off."
+    fi
+
+}
+
+function main() {
+    local mountpoint=""
+    local device
+
+    if [[ $# -eq 0 ]]; then
+        _print_usage
+        return 1
+    elif [[ $# -eq 1 ]]; then
+        mountpoint="${1}"
+    else
+        _print_usage
+        return 1
+    fi
+
+    if [[ -z "${mountpoint}" ]]; then
+        echo
+        print_error "Aborted: Mount point must be provided."
+        return 1
+    fi
+
+    # get the mountpoint device
+    device=$(findmnt -n -o SOURCE --target "${mountpoint}")
+
+    # Confirm
+    echo
+    read -rp "Are you sure you want to unmount ${mountpoint} (${device})? (yes/NO): " confirm
+    if [[ "${confirm}" != "yes" ]]; then
+        echo "Aborted."
+        return 1
+    fi
+
+    _safe_umount "${mountpoint}" "${device}"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

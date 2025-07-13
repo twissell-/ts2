@@ -19,6 +19,7 @@ function _print_usage() {
 
 function _calculate() {
     local directory="${1:-}"
+    local exit_code=0
 
     if [[ -z "${directory}" ]]; then
         _print_usage
@@ -34,49 +35,29 @@ function _calculate() {
     counter=1
     while IFS= read -r dir; do
         print_info "(${counter}/${total}) Calculating checksums for files in ${dir}"
-        (
-            cd "${dir}"
-            find . -maxdepth 1 -type f ! -name "checksums.sha512*" -exec sha512sum "{}" + > "./checksums.sha512"
+        if ! (cd "${dir}" && {
+            find . -maxdepth 1 -type f ! -name "checksums.sha512*" ! -name "*.par2" ! -name "metadata.json" -exec sha512sum "{}" + > "./checksums.sha512"
             sha512sum "./checksums.sha512" > "./checksums.sha512.sig"
-        )
+        }); then
+            print_error "Failed to calculate checksums for ${dir}"
+            exit_code=1
+        fi
         counter=$((counter + 1))
     done < <(find "${directory}" -type d)
 
-    print_success "Checksums calculated successfully"
-}
-
-function _verify_checksums() {
-    local directory="${1:-}"
-
-    if [[ ! -f "${directory}/checksums.sha512" ]]; then
-        print_error "Missing checksums file for ${directory}"
-        return 1
+    if [[ ${exit_code} -eq 0 ]]; then
+        echo
+        print_success "Checksums calculated successfully for all directories"
+    else
+        echo
+        print_error "Failed to calculate checksums for some directories"
     fi
-
-    if [[ ! -f "${directory}/checksums.sha512.sig" ]]; then
-        print_error "Missing signature file for ${directory}"
-        return 1
-    fi
-}
-
-function _verify_signature() {
-    local directory="${1:-}"
-
-    (
-        cd "${directory}"
-        if ! sha512sum --quiet -c "checksums.sha512.sig" &> /dev/null; then
-            print_error "Signature verification failed for ${directory}"
-            return 1
-        fi
-    )
+    return "${exit_code}"
 }
 
 function _verify() {
     local directory="${1:-}"
-    local output_file
     local exit_code=0
-
-    output_file="$(mktemp)"
 
     if [[ -z "${directory}" ]]; then
         _print_usage
@@ -91,45 +72,38 @@ function _verify() {
     total=$(find "${directory}" -type d | wc -l)
     counter=1
     while IFS= read -r dir; do
-        if ! _verify_checksums "${dir}"; then
-            exit_code=10
-            continue
-        fi
-
-        if ! _verify_signature "${dir}"; then
-            exit_code=2
-            continue
-        fi
-
         print_info "(${counter}/${total}) Verifying checksums for files in ${dir}"
-        echo "++${dir}" >> "${output_file}"
-        (
-            cd "${dir}"
-            sha512sum --quiet -c "checksums.sha512" >> "${output_file}"
-        )
+
+        if [[ ! -f "${dir}/checksums.sha512" || ! -f "${dir}/checksums.sha512.sig" ]]; then
+            print_error "Missing checksums or signature file for ${dir}"
+            exit_code=1
+            continue
+        fi
+
+        if ! (cd "${dir}" && sha512sum --quiet -c "checksums.sha512.sig" &> /dev/null); then
+            print_error "Signature verification failed for ${dir}"
+            exit_code=1
+            continue
+        fi
+
+        if ! output=$( (cd "${dir}" && sha512sum -c "checksums.sha512") 2>&1); then
+            print_warning "Checksum verification failed for ${dir}"
+            echo "${output}" | grep 'FAILED$'
+            exit_code=1
+        else
+            print_success "Checksums verified successfully for ${dir}"
+        fi
+
         counter=$((counter + 1))
     done < <(find "${directory}" -type d)
 
-    if grep -q "FAILED" "${output_file}"; then
-        print_error "Checksum verification failed"
-        base_dir=""
-        while IFS= read -r line; do
-            if [[ "${line}" == "++"* ]]; then
-                base_dir="${line#++}"
-            else
-                echo "${base_dir}${line#./}"
-            fi
-        done < "${output_file}"
-        exit_code=1
-    elif [[ "${exit_code}" -eq 2 ]]; then
-        print_error "Signature verification failed for some directories"
-    elif [[ "${exit_code}" -eq 10 ]]; then
-        print_warning "Some directories are missing checksums files or signatures"
+    if [[ ${exit_code} -eq 0 ]]; then
+        echo
+        print_success "Checksums verified successfully for all directories"
     else
-        print_success "Checksums verified successfully"
+        echo
+        print_error "Checksum verification failed for some directories"
     fi
-
-    rm "${output_file}"
     return "${exit_code}"
 }
 
